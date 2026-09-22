@@ -146,6 +146,8 @@ jobs:
           echo "==== KSU / SUSFS / LTO ===="
           grep -E "CONFIG_(KSU|LTO_CLANG|LOCALVERSION)" out/.config | tee -a "$LOG"
           diff <(grep -E '^CONFIG_' "$GITHUB_WORKSPACE/$DEFCONFIG_FILE" | sort) <(grep -E '^CONFIG_' out/.config | sort) | tee config.diff || true
+          # jangan biarkan kosong: GitHub menolak upload aset 0 byte
+          [ -s config.diff ] || echo "# config identik dengan $DEFCONFIG_FILE" > config.diff
 
       - name: Build kernel
         working-directory: kernel
