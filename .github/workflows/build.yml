@@ -29,6 +29,9 @@ env:
   # Toolchain sama dengan kernel bawaan (Android clang r563880c / clang 21)
   CLANG_VER: clang-r563880c
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-qpr2-release/clang-r563880c.tar.gz
+  # KernelSU-Next resmi (untuk varian "ksu")
+  KSUN_OFFICIAL_SETUP: https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v3.4.0/kernel/setup.sh
+  KSUN_OFFICIAL_TAG: v3.4.0
   ANYKERNEL_REPO: https://github.com/bezkemods/AnyKernel3
   ANYKERNEL_BRANCH: garnet
   DEFCONFIG_FILE: configs/garnet_infinityx-3.12.config
@@ -37,6 +40,13 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # vanilla = tanpa KSU/SUSFS, ksu = KSU Next v3.4.0 resmi tanpa SUSFS, full = KSU Next dev-susfs + SUSFS
+        variant: [vanilla, ksu, full]
+    env:
+      VARIANT: ${{ matrix.variant }}
     steps:
       - name: Checkout repo ini
         uses: actions/checkout@v4
@@ -77,6 +87,7 @@ jobs:
           git log --oneline -3
 
       - name: Pasang SUSFS (sisi kernel)
+        if: matrix.variant == 'full'
         working-directory: kernel
         run: |
           git clone -q -b "$SUSFS_BRANCH" "$SUSFS_REPO" ../susfs4ksu
@@ -93,14 +104,21 @@ jobs:
           # Patch tambahan dari repo ini (kalau ada)
           for p in ../patches/kernel/*.patch; do [ -e "$p" ] || continue; echo "apply $p"; git apply -v "$p"; done
 
-      - name: Pasang KernelSU-Next (dev-susfs)
+      - name: Pasang KernelSU-Next
+        if: matrix.variant != 'vanilla'
         working-directory: kernel
         run: |
           exec > >(tee -a "$LOG") 2>&1
           rm -rf KernelSU-Next drivers/kernelsu
-          curl -fsSL "$KSUN_SETUP" | bash -s "$KSUN_COMMIT"
-          cd KernelSU-Next
-          test "$(git rev-parse HEAD)" = "$KSUN_COMMIT"
+          if [ "$VARIANT" = full ]; then
+            curl -fsSL "$KSUN_SETUP" | bash -s "$KSUN_COMMIT"
+            cd KernelSU-Next
+            test "$(git rev-parse HEAD)" = "$KSUN_COMMIT"
+          else
+            curl -fsSL "$KSUN_OFFICIAL_SETUP" | bash -s "$KSUN_OFFICIAL_TAG"
+            cd KernelSU-Next
+            git describe --tags
+          fi
           echo "KSU Next commit count: $(git rev-list --count HEAD) -> KSU_VERSION = $((30000 + $(git rev-list --count HEAD)))"
           for p in ../../patches/ksun/*.patch; do [ -e "$p" ] || continue; echo "apply $p"; git apply -v "$p"; done
 
@@ -113,8 +131,12 @@ jobs:
           mkdir -p out
           cp "$GITHUB_WORKSPACE/$DEFCONFIG_FILE" out/.config
           # ThinLTO: jauh lebih ringan dari Full LTO, tidak mengubah ABI modul vendor
-          scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN \
-            -e KSU -e KSU_SUSFS
+          scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN
+          case "$VARIANT" in
+            vanilla) scripts/config --file out/.config -d KSU -d KSU_SUSFS ;;
+            ksu)     scripts/config --file out/.config -e KSU -d KSU_SUSFS ;;
+            full)    scripts/config --file out/.config -e KSU -e KSU_SUSFS ;;
+          esac
           $MK olddefconfig
           echo "==== KSU / SUSFS / LTO ===="
           grep -E "CONFIG_(KSU|LTO_CLANG|LOCALVERSION)" out/.config | tee -a "$LOG"
@@ -147,8 +169,8 @@ jobs:
           git clone -q --depth 1 -b "$ANYKERNEL_BRANCH" "$ANYKERNEL_REPO" ak3
           rm -rf ak3/.git ak3/README.md
           cp kernel/out/arch/arm64/boot/Image ak3/
-          KSUV=$((30000 + $(git -C kernel/KernelSU-Next rev-list --count HEAD)))
-          NAME="InnOvaTioN-KSUN-v3.4-${KSUV}-SUSFS-garnet-$(date +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
+          KSUV=0; [ -d kernel/KernelSU-Next ] && KSUV=$((30000 + $(git -C kernel/KernelSU-Next rev-list --count HEAD)))
+          NAME="InnOvaTioN-${VARIANT}-ksu${KSUV}-garnet-$(date +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
           (cd ak3 && zip -r9q "../${NAME}.zip" .)
           cp kernel/out/arch/arm64/boot/Image "${NAME}.Image"
           sha256sum "${NAME}.zip" "${NAME}.Image" > "${NAME}.sha256"
@@ -160,9 +182,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           N="${{ steps.pack.outputs.name }}"
-          gh release create "r${GITHUB_RUN_NUMBER}" "$N.zip" "$N.Image" "$N.sha256" kernel/config.diff kernel/out/vmlinux.symvers \
+          cp kernel/config.diff "$N.config.diff"; cp kernel/out/vmlinux.symvers "$N.symvers"
+          gh release create "r${GITHUB_RUN_NUMBER}-${VARIANT}" "$N.zip" "$N.Image" "$N.sha256" "$N.config.diff" "$N.symvers" \
             --prerelease --title "$N" \
-            --notes "Kernel InnOvaTioN ${KERNEL_COMMIT:0:10} (revert KSU lama) + SUSFS ${SUSFS_COMMIT:0:10} + KernelSU-Next ${KSUN_COMMIT:0:10} (KSU_VERSION ${{ steps.pack.outputs.ksuv }}). BELUM DIUJI — tes dulu pakai fastboot boot."
+            --notes "Varian ${VARIANT}. Kernel InnOvaTioN ${KERNEL_COMMIT:0:10} (revert KSU lama) + SUSFS ${SUSFS_COMMIT:0:10} + KernelSU-Next ${KSUN_COMMIT:0:10} (KSU_VERSION ${{ steps.pack.outputs.ksuv }}). BELUM DIUJI — tes dulu pakai fastboot boot."
 
       - name: Tampilkan log error
         if: failure()
