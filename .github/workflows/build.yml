@@ -7,6 +7,7 @@ on:
       - ".github/workflows/build.yml"
       - "configs/**"
       - "patches/**"
+      - "modules/**"
   workflow_dispatch:
 
 permissions:
@@ -134,6 +135,12 @@ jobs:
           ls -la out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
 
+      - name: Cek CRC simbol vs modul vendor
+        run: |
+          exec > >(tee -a "$LOG") 2>&1
+          ls -la kernel/out/vmlinux.symvers
+          python3 modules/check_crcs.py kernel/out/vmlinux.symvers modules/required_crcs.tsv
+
       - name: Bungkus AnyKernel3
         id: pack
         run: |
@@ -153,7 +160,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           N="${{ steps.pack.outputs.name }}"
-          gh release create "r${GITHUB_RUN_NUMBER}" "$N.zip" "$N.Image" "$N.sha256" kernel/config.diff \
+          gh release create "r${GITHUB_RUN_NUMBER}" "$N.zip" "$N.Image" "$N.sha256" kernel/config.diff kernel/out/vmlinux.symvers \
             --prerelease --title "$N" \
             --notes "Kernel InnOvaTioN ${KERNEL_COMMIT:0:10} (revert KSU lama) + SUSFS ${SUSFS_COMMIT:0:10} + KernelSU-Next ${KSUN_COMMIT:0:10} (KSU_VERSION ${{ steps.pack.outputs.ksuv }}). BELUM DIUJI — tes dulu pakai fastboot boot."
 
