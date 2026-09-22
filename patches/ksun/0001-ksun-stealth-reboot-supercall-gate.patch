@@ -1,0 +1,20 @@
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -1058,6 +1058,17 @@
+         return -EINVAL; 
+     }
+ 
++    /*
++     * Stealth gate (kernel-patch-infinity-x): KSU supercalls are only for the
++     * verified manager (identified by APK signature at boot via throne_tracker)
++     * or root (ksud). Any other caller gets the exact stock reboot() result for
++     * this invalid magic (-EINVAL), so KSU presence cannot be probed by an
++     * unprivileged app through the reboot syscall.
++     */
++    if (!is_manager() && current_uid().val != 0) {
++        return -EINVAL;
++    }
++
+     if (magic2 == KSU_INSTALL_MAGIC2) {
+         return ksu_supercall_reboot_handler(arg);
+     }

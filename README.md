@@ -15,3 +15,9 @@ Alur workflow (`.github/workflows/build.yml`):
 Patch tambahan: taruh di `patches/kernel/*.patch` (kernel) atau `patches/ksun/*.patch` (KernelSU-Next).
 
 > Hasil build BELUM tentu aman. Tes dulu pakai `fastboot boot`, simpan backup `boot.img`.
+
+## Patch anti-deteksi (patches/ksun/)
+- `0001-ksun-stealth-reboot-supercall-gate.patch` — gerbang stealth di `ksu_handle_sys_reboot`:
+  supercall KSU (via syscall reboot) hanya dilayani untuk manager terverifikasi (`is_manager()`)
+  atau root (ksud). Pemanggil lain dapat `-EINVAL` persis seperti kernel stok → keberadaan KSU
+  tidak bisa diprobe app biasa lewat syscall reboot. Tidak perlu rebuild manager (magic tak diubah).
