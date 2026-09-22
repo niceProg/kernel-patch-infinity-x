@@ -1,0 +1,166 @@
+name: Build InnOvaTioN + KernelSU-Next + SUSFS (garnet)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build.yml"
+      - "configs/**"
+      - "patches/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Source kernel InnOvaTioN (bezkemods). Commit ini = "Add KSUNEXT && integrate SUSFS" (9 Agu 2026);
+  # kita revert commit ini lalu pasang ulang KSU Next v3.4 + SUSFS yang lebih baru.
+  KERNEL_REPO: https://github.com/bezkemods/android_kernel_xiaomi_sm7435-new
+  KERNEL_BRANCH: innovation
+  KERNEL_COMMIT: d3e517655710bc6c085a574cee44b15a4d5d008f
+  # KernelSU-Next v3.4.0 + SUSFS v2.3.0 (branch dev-susfs milik pershoot, maintainer KSU Next)
+  KSUN_SETUP: https://raw.githubusercontent.com/pershoot/KernelSU-Next/46c30a0249982970b22d09235ac2d46e9889cc52/kernel/setup.sh
+  KSUN_COMMIT: 46c30a0249982970b22d09235ac2d46e9889cc52
+  # Patch SUSFS sisi kernel (simonpunk, gki-android12-5.10)
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android12-5.10
+  SUSFS_COMMIT: f3b5aecf53ff8b3296603071b91383f6be6c7cbb
+  # Toolchain sama dengan kernel bawaan (Android clang r563880c / clang 21)
+  CLANG_VER: clang-r563880c
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-qpr2-release/clang-r563880c.tar.gz
+  ANYKERNEL_REPO: https://github.com/bezkemods/AnyKernel3
+  ANYKERNEL_BRANCH: garnet
+  DEFCONFIG_FILE: configs/garnet_infinityx-3.12.config
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Checkout repo ini
+        uses: actions/checkout@v4
+
+      - name: Kosongkan disk runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install dependensi
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev cpio lz4 zip python3 git make
+          echo "LOG=$GITHUB_WORKSPACE/build.log" >> "$GITHUB_ENV"
+
+      - name: Cache clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: ${{ env.CLANG_VER }}
+
+      - name: Download clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p clang
+          curl -fsSL "$CLANG_URL" | tar -xz -C clang
+
+      - name: Clone kernel source
+        run: |
+          exec > >(tee -a "$LOG") 2>&1
+          git clone --depth 2 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          test "$(git rev-parse HEAD)" = "$KERNEL_COMMIT" || { echo "::error::HEAD branch $KERNEL_BRANCH sudah berubah dari $KERNEL_COMMIT"; exit 1; }
+          git config user.name ci && git config user.email ci@localhost
+          # Buang KSU Next lama + SUSFS v2.2.0 bawaan InnOvaTioN
+          git revert --no-edit HEAD
+          git log --oneline -3
+
+      - name: Pasang SUSFS (sisi kernel)
+        working-directory: kernel
+        run: |
+          git clone -q -b "$SUSFS_BRANCH" "$SUSFS_REPO" ../susfs4ksu
+          git -C ../susfs4ksu checkout -q "$SUSFS_COMMIT"
+          grep -m1 SUSFS_VERSION ../susfs4ksu/kernel_patches/include/linux/susfs.h
+          cp ../susfs4ksu/kernel_patches/fs/* fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          set -o pipefail
+          patch -p1 --forward --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch 2>&1 | tee -a "$LOG" || {
+            echo "---- rejects ----" | tee -a "$LOG"
+            find . -name '*.rej' -exec sh -c 'echo "== $1"; cat "$1"' _ {} \; | tee -a "$LOG"
+            exit 1
+          }
+          # Patch tambahan dari repo ini (kalau ada)
+          for p in ../patches/kernel/*.patch; do [ -e "$p" ] || continue; echo "apply $p"; git apply -v "$p"; done
+
+      - name: Pasang KernelSU-Next (dev-susfs)
+        working-directory: kernel
+        run: |
+          exec > >(tee -a "$LOG") 2>&1
+          rm -rf KernelSU-Next drivers/kernelsu
+          curl -fsSL "$KSUN_SETUP" | bash -s "$KSUN_COMMIT"
+          cd KernelSU-Next
+          test "$(git rev-parse HEAD)" = "$KSUN_COMMIT"
+          echo "KSU Next commit count: $(git rev-list --count HEAD) -> KSU_VERSION = $((30000 + $(git rev-list --count HEAD)))"
+          for p in ../../patches/ksun/*.patch; do [ -e "$p" ] || continue; echo "apply $p"; git apply -v "$p"; done
+
+      - name: Siapkan config
+        working-directory: kernel
+        run: |
+          exec > >(tee -a "$LOG") 2>&1
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          MK="make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-"
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/$DEFCONFIG_FILE" out/.config
+          # ThinLTO: jauh lebih ringan dari Full LTO, tidak mengubah ABI modul vendor
+          scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN \
+            -e KSU -e KSU_SUSFS
+          $MK olddefconfig
+          echo "==== KSU / SUSFS / LTO ===="
+          grep -E "CONFIG_(KSU|LTO_CLANG|LOCALVERSION)" out/.config | tee -a "$LOG"
+          diff <(grep -E '^CONFIG_' "$GITHUB_WORKSPACE/$DEFCONFIG_FILE" | sort) <(grep -E '^CONFIG_' out/.config | sort) | tee config.diff || true
+
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          KBUILD_BUILD_USER: niceProg
+          KBUILD_BUILD_HOST: github-actions
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          clang --version | head -1
+          set -o pipefail
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            Image 2>&1 | tee -a "$LOG"
+          ls -la out/arch/arm64/boot/Image
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+
+      - name: Bungkus AnyKernel3
+        id: pack
+        run: |
+          git clone -q --depth 1 -b "$ANYKERNEL_BRANCH" "$ANYKERNEL_REPO" ak3
+          rm -rf ak3/.git ak3/README.md
+          cp kernel/out/arch/arm64/boot/Image ak3/
+          KSUV=$((30000 + $(git -C kernel/KernelSU-Next rev-list --count HEAD)))
+          NAME="InnOvaTioN-KSUN-v3.4-${KSUV}-SUSFS-garnet-$(date +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
+          (cd ak3 && zip -r9q "../${NAME}.zip" .)
+          cp kernel/out/arch/arm64/boot/Image "${NAME}.Image"
+          sha256sum "${NAME}.zip" "${NAME}.Image" > "${NAME}.sha256"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "ksuv=$KSUV" >> "$GITHUB_OUTPUT"
+
+      - name: Rilis
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N="${{ steps.pack.outputs.name }}"
+          gh release create "r${GITHUB_RUN_NUMBER}" "$N.zip" "$N.Image" "$N.sha256" kernel/config.diff \
+            --prerelease --title "$N" \
+            --notes "Kernel InnOvaTioN ${KERNEL_COMMIT:0:10} (revert KSU lama) + SUSFS ${SUSFS_COMMIT:0:10} + KernelSU-Next ${KSUN_COMMIT:0:10} (KSU_VERSION ${{ steps.pack.outputs.ksuv }}). BELUM DIUJI — tes dulu pakai fastboot boot."
+
+      - name: Tampilkan log error
+        if: failure()
+        run: |
+          [ -f "$LOG" ] || exit 0
+          grep -nE "error:|Error [0-9]|undefined reference|\.rej|FAILED|Hunk" "$LOG" | head -60 > err.txt || true
+          { echo "== baris error =="; cat err.txt; echo "== 80 baris terakhir =="; tail -n 80 "$LOG"; } > summary.txt
+          echo "::error title=build-log::$(sed -e 's/%/%25/g' summary.txt | sed ':a;N;$!ba;s/\n/%0A/g')"
