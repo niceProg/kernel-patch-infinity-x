@@ -44,7 +44,7 @@ jobs:
       fail-fast: false
       matrix:
         # vanilla = tanpa KSU/SUSFS, ksu = KSU Next v3.4.0 resmi tanpa SUSFS, full = KSU Next dev-susfs + SUSFS
-        variant: [vanilla, ksu, full]
+        variant: [full]
     env:
       VARIANT: ${{ matrix.variant }}
     steps:
@@ -130,8 +130,8 @@ jobs:
           MK="make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-"
           mkdir -p out
           cp "$GITHUB_WORKSPACE/$DEFCONFIG_FILE" out/.config
-          # ThinLTO: jauh lebih ringan dari Full LTO, tidak mengubah ABI modul vendor
-          scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN
+          # Full LTO seperti kernel asli bezke. ThinLTO (r1-r3) menghasilkan Image tidak deterministik:
+          # r1 panic saat boot sementara r3 dari source yang sama bisa boot.
           case "$VARIANT" in
             vanilla) scripts/config --file out/.config -d KSU -d KSU_SUSFS ;;
             ksu)     scripts/config --file out/.config -e KSU -d KSU_SUSFS ;;
